@@ -4,7 +4,7 @@ Streamlit Web App for the saved XGB-PSO pharmaceutical photodegradation model.
 
 Workflow:
 1. Download an Excel input template.
-2. Fill the experimental conditions and optionally the measured removal (%).
+2. Fill the experimental conditions and the measured degradation/removal (%).
 3. Upload the completed Excel/CSV file.
 4. Apply the final saved XGB-PSO model to the uploaded rows as unseen data.
 5. Display predictions, validation statistics, and an experimental-versus-predicted plot.
@@ -12,7 +12,6 @@ Workflow:
 
 Important:
 - The model is already trained. Uploaded rows are not used to retrain the model.
-- The descriptive "Oxidant" column is retained in the spreadsheet but is not a model input.
 - Light-source coding used by the saved model is UV = 1, visible light = 2,
   and simulated solar light = 3.
 """
@@ -51,7 +50,6 @@ LOCAL_WINDOWS_MODEL = Path(
 
 # Spreadsheet headers follow the user's SampleData.xlsx file.
 BET_COL = "BET specific surface area (m2 g-1)"
-OXIDANT_NAME_COL = "Oxidant"
 OXIDANT_CONC_COL = "Oxidant concentration (mM)"
 MW_COL = "Molecular Weight (g/mol)"
 HBDC_COL = "HBDC"
@@ -71,7 +69,6 @@ DOMAIN_COL = "Outside model training range"
 
 TEMPLATE_COLUMNS = [
     BET_COL,
-    OXIDANT_NAME_COL,
     OXIDANT_CONC_COL,
     MW_COL,
     HBDC_COL,
@@ -127,7 +124,6 @@ FINAL_MODEL_METRICS = pd.DataFrame(
 # Alternative column names accepted during upload.
 COLUMN_ALIASES = {
     BET_COL: [BET_COL, "BET specific surface area (m²/g)", "Specific Surface Area (m2/g)"],
-    OXIDANT_NAME_COL: [OXIDANT_NAME_COL, "Oxidant type"],
     OXIDANT_CONC_COL: [OXIDANT_CONC_COL, "Oxidant Concentration (mM)"],
     MW_COL: [MW_COL, "Molecular weight (g/mol)", "MW (g mol-1)"],
     HBDC_COL: [HBDC_COL],
@@ -170,9 +166,10 @@ st.set_page_config(
 
 st.title("Web-Based XGB-PSO Model for Pharmaceutical Removal by Photocatalysts")
 st.write(
-    "Download the Excel template, enter the photocatalyst and pharmaceutical data, "
-    "upload the completed file, and apply the final XGB-PSO model to predict "
-    "degradation or removal efficiency."
+    "Download the Excel template, fill the 11 numerical model inputs, upload the "
+    "completed file, and apply the final XGB-PSO model to predict pharmaceutical "
+    "degradation or removal efficiency. The Excel file must contain exactly "
+    "11 model inputs and one experimental output column."
 )
 
 
@@ -325,10 +322,8 @@ def prepare_uploaded_data(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     if missing_inputs:
         raise ValueError("Missing required columns: " + "; ".join(missing_inputs))
 
-    if OXIDANT_NAME_COL not in frame.columns:
-        frame[OXIDANT_NAME_COL] = ""
     if TARGET_COL not in frame.columns:
-        frame[TARGET_COL] = np.nan
+        raise ValueError(f"Missing required output column: {TARGET_COL}")
 
     # Remove rows that have no model inputs at all.
     nonempty_mask = ~frame[MODEL_INPUT_COLUMNS].isna().all(axis=1)
@@ -352,6 +347,14 @@ def prepare_uploaded_data(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         )
 
     frame[TARGET_COL] = pd.to_numeric(frame[TARGET_COL], errors="coerce")
+    invalid_target = frame[TARGET_COL].isna()
+    if invalid_target.any():
+        spreadsheet_rows = [str(index + 2) for index in frame.index[invalid_target][:20]]
+        raise ValueError(
+            f"{int(invalid_target.sum())} row(s) contain a missing or nonnumeric output. "
+            "Correct the Degradation or Removal (%) value in spreadsheet row(s): "
+            + ", ".join(spreadsheet_rows)
+        )
     frame[LIGHT_COL] = ordered_inputs[LIGHT_COL]
 
     return frame, ordered_inputs
@@ -579,8 +582,9 @@ st.download_button(
 )
 
 st.info(
-    "Fill the required input columns. The final experimental degradation/removal column is optional. "
-    "When it is filled, the application calculates validation statistics and displays an R² plot."
+    "The workbook contains exactly 11 numerical model inputs and one experimental output. "
+    "Fill every column for each row. The application predicts degradation/removal and "
+    "calculates R², RMSE, MAE, MAPE, AARD, residuals, and the validation plot."
 )
 
 
@@ -630,7 +634,7 @@ st.subheader("Step 3: Confirm Model Application")
 
 left_info, middle_info, right_info = st.columns(3)
 left_info.metric("Uploaded rows", len(display_data))
-middle_info.metric("Model inputs", len(MODEL_INPUT_COLUMNS))
+middle_info.metric("Numerical model inputs", len(MODEL_INPUT_COLUMNS))
 right_info.metric("Rows outside training ranges", int(outside_domain.sum()))
 
 st.write(
@@ -638,7 +642,10 @@ st.write(
     "The uploaded observations remain unseen validation/prediction data and are not used for retraining."
 )
 
-with st.expander("Show exact ordered model inputs"):
+with st.expander("Show the exact 11 ordered model inputs"):
+    st.caption(
+        "Columns 1–11 are passed to the model in the order shown. Column 12 is the experimental output used for validation."
+    )
     ordered_preview = model_inputs.copy()
     ordered_preview.columns = [f"{index + 1}. {column}" for index, column in enumerate(ordered_preview.columns)]
     st.dataframe(ordered_preview.head(25), use_container_width=True, hide_index=True)
@@ -726,8 +733,7 @@ if st.session_state.prediction_run:
         metric_6.metric("Experimental rows", int(statistics["Number of validation rows"]))
     else:
         st.info(
-            "Predictions were generated, but validation statistics were not calculated because "
-            "the experimental degradation/removal column was empty."
+            "The experimental output is required for validation."
         )
 
     st.subheader("Prediction Results")

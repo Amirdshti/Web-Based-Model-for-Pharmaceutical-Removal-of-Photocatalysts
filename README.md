@@ -1,32 +1,32 @@
 # XGB-PSO Pharmaceutical Removal Streamlit App
 
-This version follows the Excel workflow described in Section 7.4:
+This app applies the saved `XGBPSOModel_success_seed605.pkl` model to an uploaded Excel workbook.
 
-1. Download the Excel template.
-2. Fill the photocatalyst/pharmaceutical data.
-3. Upload the completed file.
-4. Run the saved XGB-PSO model.
-5. Review predictions, optional validation metrics, and the R2 plot.
-6. Download the Excel results and plot.
+## Required Excel structure
 
-## Required repository files
+The first worksheet must contain exactly 11 model inputs followed by 1 experimental output:
+
+1. BET specific surface area (m2 g-1)
+2. Oxidant concentration (mM)
+3. Molecular Weight (g/mol)
+4. HBDC
+5. HBAC
+6. Topological Polar Surface Area (Å²)
+7. Initial concentration of pollutant (mg/L)
+8. pH
+9. Light source
+10. Catalyst dosage (mg/L)
+11. t (min)
+12. Degradation or Removal (%) — experimental output
+
+Light-source coding: UV = 1, visible light = 2, simulated solar light = 3. Text labels are also accepted.
+
+## Repository files
 
 - `app.py`
+- `SampleData.xlsx`
 - `requirements.txt`
 - `runtime.txt`
-- `SampleData.xlsx` (the exact downloadable Excel template)
 - `XGBPSOModel_success_seed605.pkl`
 
-The model file must be stored beside `app.py` for automatic loading on Streamlit Community Cloud. Alternatively, it can be uploaded through the app sidebar during each session.
-
-## Important input rules
-
-- The descriptive `Oxidant` column is not a numerical model input.
-- The model uses oxidant concentration in mM.
-- Light source: UV = 1, visible light = 2, simulated solar light = 3. Text labels are accepted.
-- Catalyst dosage must be entered in mg/L.
-- The experimental degradation/removal column is optional. When supplied, the app calculates R2, RMSE, MAE, MAPE, AARD, residuals, and the experimental-versus-predicted plot.
-- Uploaded rows are treated as unseen data; the final model is not retrained.
-
-
-The Step 1 download button serves `SampleData.xlsx` directly, without recreating or modifying the workbook.
+The app downloads `SampleData.xlsx`, accepts the completed workbook, generates XGB-PSO predictions, calculates validation statistics, plots experimental versus predicted values, and exports the results to Excel.
