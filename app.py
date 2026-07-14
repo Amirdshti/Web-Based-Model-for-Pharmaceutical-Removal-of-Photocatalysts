@@ -1,27 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit Web App for the saved XGB-PSO pharmaceutical photodegradation model.
+Streamlit application for developing an XGBoost-PSO model from an uploaded
+Excel dataset containing 11 inputs and 1 output.
 
-Workflow:
-1. Download an Excel input template.
-2. Fill the experimental conditions and the measured degradation/removal (%).
-3. Upload the completed Excel/CSV file.
-4. Apply the final saved XGB-PSO model to the uploaded rows as unseen data.
-5. Display predictions, validation statistics, and an experimental-versus-predicted plot.
-6. Download complete Excel results and the validation plot.
-
-Important:
-- The model is already trained. Uploaded rows are not used to retrain the model.
-- Light-source coding used by the saved model is UV = 1, visible light = 2,
-  and simulated solar light = 3.
+Workflow
+1. Download the Excel template.
+2. Fill and upload the completed dataset.
+3. Select the train/test ratio and model settings.
+4. Develop or redevelop an XGBoost model, with optional PSO optimization.
+5. Display R², RMSE, MAE and MAPE for train, test and total data.
+6. Display an experimental-versus-predicted plot and feature importance.
+7. Download predictions, statistics, hyperparameters, plot and trained model.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
-import pickle
-from copy import copy
-from datetime import datetime, timezone
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,756 +27,790 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import KFold, cross_val_score, train_test_split
+from xgboost import XGBRegressor
 
 
 # ============================================================
-# Application and saved-model configuration
-# ============================================================
-APP_DIR = Path(__file__).resolve().parent
-MODEL_FILENAME = "XGBPSOModel_success_seed605.pkl"
-MODEL_PATH = APP_DIR / MODEL_FILENAME
-TEMPLATE_FILENAME = "SampleData.xlsx"
-TEMPLATE_PATH = APP_DIR / TEMPLATE_FILENAME
-
-# This Windows path is checked only when the app is run on the user's own PC.
-# It is not accessible from Streamlit Community Cloud.
-LOCAL_WINDOWS_MODEL = Path(
-    r"C:\Users\24550372\OneDrive - UTS\UTS PhD\Photocatalyst\Pharmaceutical Review\Data and model\pharmamlv3\XGBPSOModel_success_seed605.pkl"
-)
-
-# Spreadsheet headers follow the user's SampleData.xlsx file.
-BET_COL = "BET specific surface area (m2 g-1)"
-OXIDANT_CONC_COL = "Oxidant concentration (mM)"
-MW_COL = "Molecular Weight (g/mol)"
-HBDC_COL = "HBDC"
-HBAC_COL = "HBAC"
-TPSA_COL = "Topological Polar Surface Area (Å²)"
-INITIAL_CONC_COL = "Initial concentration of pollutant (mg/L)"
-PH_COL = "pH"
-LIGHT_COL = "Light source"
-CATALYST_COL = "Catalyst dosage (mg/L)"
-TIME_COL = "t (min)"
-TARGET_COL = "Degradation or Removal (%)"
-PREDICTION_COL = "Predicted Degradation or Removal (%)"
-RESIDUAL_COL = "Residual: Experimental - Predicted"
-ABS_ERROR_COL = "Absolute Error"
-REL_ERROR_COL = "Absolute Relative Error (%)"
-DOMAIN_COL = "Outside model training range"
-
-TEMPLATE_COLUMNS = [
-    BET_COL,
-    OXIDANT_CONC_COL,
-    MW_COL,
-    HBDC_COL,
-    HBAC_COL,
-    TPSA_COL,
-    INITIAL_CONC_COL,
-    PH_COL,
-    LIGHT_COL,
-    CATALYST_COL,
-    TIME_COL,
-    TARGET_COL,
-]
-
-# Exact numerical feature order used in the final saved model.
-MODEL_INPUT_COLUMNS = [
-    BET_COL,
-    OXIDANT_CONC_COL,
-    MW_COL,
-    HBDC_COL,
-    HBAC_COL,
-    TPSA_COL,
-    INITIAL_CONC_COL,
-    PH_COL,
-    LIGHT_COL,
-    CATALYST_COL,
-    TIME_COL,
-]
-
-# Training-domain limits extracted from the supplied MATLAB model results.
-TRAINING_DOMAIN = {
-    BET_COL: (5.686, 733.03),
-    OXIDANT_CONC_COL: (0.0, 8.0),
-    MW_COL: (151.16, 480.9),
-    HBDC_COL: (1.0, 7.0),
-    HBAC_COL: (1.0, 12.0),
-    TPSA_COL: (37.3, 235.0),
-    INITIAL_CONC_COL: (0.5, 200.0),
-    PH_COL: (1.0, 11.5),
-    LIGHT_COL: (1.0, 3.0),
-    CATALYST_COL: (50.0, 8000.0),
-    TIME_COL: (0.5, 2880.0),
-}
-
-FINAL_MODEL_METRICS = pd.DataFrame(
-    {
-        "Metric": ["R²", "RMSE", "MAE", "AARD (%)"],
-        "Training": [0.996338, 1.779452, 1.202669, 5.279755],
-        "Testing": [0.968422, 4.947778, 3.371177, 11.857105],
-        "Total": [0.992545, 2.520885, 1.527061, 6.263674],
-    }
-)
-
-# Alternative column names accepted during upload.
-COLUMN_ALIASES = {
-    BET_COL: [BET_COL, "BET specific surface area (m²/g)", "Specific Surface Area (m2/g)"],
-    OXIDANT_CONC_COL: [OXIDANT_CONC_COL, "Oxidant Concentration (mM)"],
-    MW_COL: [MW_COL, "Molecular weight (g/mol)", "MW (g mol-1)"],
-    HBDC_COL: [HBDC_COL],
-    HBAC_COL: [HBAC_COL],
-    TPSA_COL: [TPSA_COL, "Topological Polar Surface Area (Å²)", "TPSA (Å²)", "TPSA"],
-    INITIAL_CONC_COL: [
-        INITIAL_CONC_COL,
-        "Initial pollutant concentration, C0 (mg/L)",
-        "Pollutant dosage (mg/L)",
-    ],
-    PH_COL: [PH_COL, "Solution pH"],
-    LIGHT_COL: [LIGHT_COL, "Light source code"],
-    CATALYST_COL: [CATALYST_COL, "Photocatalyst dosage (mg/L)"],
-    TIME_COL: [TIME_COL, "Reaction time (min)"],
-    TARGET_COL: [TARGET_COL, "Degradation (%)", "Removal (%)"],
-}
-
-LIGHT_SOURCE_MAPPING = {
-    "uv": 1.0,
-    "ultraviolet": 1.0,
-    "uv light": 1.0,
-    "visible": 2.0,
-    "visible light": 2.0,
-    "vis": 2.0,
-    "solar": 3.0,
-    "solar light": 3.0,
-    "simulated solar": 3.0,
-    "simulated solar light": 3.0,
-    "sunlight": 3.0,
-}
-
-
-# ============================================================
-# Streamlit page
+# Page configuration
 # ============================================================
 st.set_page_config(
-    page_title="XGB-PSO Pharmaceutical Removal Model",
+    page_title="XGBoost-PSO Pharmaceutical Photodegradation Model",
     layout="wide",
 )
 
-st.title("Web-Based XGB-PSO Model for Pharmaceutical Removal by Photocatalysts")
+st.title("Web-Based XGBoost–PSO Model Development App")
 st.write(
-    "Download the Excel template, fill the 11 numerical model inputs, upload the "
-    "completed file, and apply the final XGB-PSO model to predict pharmaceutical "
-    "degradation or removal efficiency. The Excel file must contain exactly "
-    "11 model inputs and one experimental output column."
+    "Download the Excel template, enter the complete modelling dataset, upload it, "
+    "select the train/test ratio, and develop or redevelop an XGBoost–PSO model for "
+    "pharmaceutical degradation or removal by photocatalysts."
 )
 
 
 # ============================================================
-# Utility functions
+# Exact data structure: 11 inputs + 1 output
 # ============================================================
-def unwrap_model(model_object: Any) -> Any:
-    """Extract an estimator when a trusted pickle stores it inside a dictionary."""
-    if isinstance(model_object, dict):
-        for key in ("model", "best_model", "xgb_model", "estimator", "regressor"):
-            candidate = model_object.get(key)
-            if candidate is not None and hasattr(candidate, "predict"):
-                return candidate
-    return model_object
+INPUT_COLUMNS = [
+    "BET specific surface area (m2 g-1)",
+    "Oxidant concentration (mM)",
+    "Molecular Weight (g/mol)",
+    "HBDC",
+    "HBAC",
+    "Topological Polar Surface Area (Å²)",
+    "Initial concentration of pollutant (mg/L)",
+    "pH",
+    "Light source",
+    "Catalyst dosage (mg/L)",
+    "t (min)",
+]
 
+OUTPUT_COLUMN = "Degradation or Removal (%)"
+TEMPLATE_COLUMNS = INPUT_COLUMNS + [OUTPUT_COLUMN]
 
-def load_serialized_model(source: Any) -> Any:
-    """Load a trusted joblib/pickle model from a file path or in-memory buffer."""
-    try:
-        return unwrap_model(joblib.load(source))
-    except Exception as joblib_error:
-        try:
-            if hasattr(source, "seek"):
-                source.seek(0)
-                return unwrap_model(pickle.load(source))
-            with open(source, "rb") as handle:
-                return unwrap_model(pickle.load(handle))
-        except Exception as pickle_error:
-            raise RuntimeError(
-                "The model could not be loaded. "
-                f"Joblib error: {joblib_error}; pickle error: {pickle_error}"
-            ) from pickle_error
-
-
-@st.cache_resource(show_spinner=False)
-def load_model_from_path(path_string: str) -> Any:
-    return load_serialized_model(path_string)
-
-
-@st.cache_resource(show_spinner=False)
-def load_model_from_bytes(file_bytes: bytes) -> Any:
-    return load_serialized_model(io.BytesIO(file_bytes))
-
-
-def find_model_path() -> Path | None:
-    for candidate in (MODEL_PATH, LOCAL_WINDOWS_MODEL):
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    return None
-
-
-def expected_feature_count(model: Any) -> int | None:
-    count = getattr(model, "n_features_in_", None)
-    if count is not None:
-        return int(count)
-    if model.__class__.__name__ == "Booster" and hasattr(model, "num_features"):
-        return int(model.num_features())
-    return None
-
-
-def predict_with_saved_model(model: Any, model_inputs: pd.DataFrame) -> np.ndarray:
-    expected = expected_feature_count(model)
-    supplied = model_inputs.shape[1]
-    if expected is not None and expected != supplied:
-        raise ValueError(
-            f"The loaded model expects {expected} inputs, but the application supplies "
-            f"{supplied}. Confirm that {MODEL_FILENAME} is the correct model file."
-        )
-
-    values = model_inputs.to_numpy(dtype=float)
-
-    if model.__class__.__name__ == "Booster":
-        import xgboost as xgb
-
-        feature_names = getattr(model, "feature_names", None)
-        if feature_names is not None and len(feature_names) != supplied:
-            feature_names = None
-        matrix = xgb.DMatrix(values, feature_names=feature_names)
-        predictions = model.predict(matrix)
-    else:
-        saved_names = getattr(model, "feature_names_in_", None)
-        if saved_names is not None and len(saved_names) == supplied:
-            prediction_input = pd.DataFrame(values, columns=list(saved_names))
-        else:
-            prediction_input = values
-        predictions = model.predict(prediction_input)
-
-    return np.asarray(predictions, dtype=float).reshape(-1)
-
-
-def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-
-
-def compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    denominator = np.abs(y_true)
-    valid = denominator > 0
-    if not np.any(valid):
-        return float("nan")
-    return float(np.mean(np.abs(y_true[valid] - y_pred[valid]) / denominator[valid]) * 100)
-
-
-def compute_statistics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    statistics = {
-        "Number of validation rows": float(len(y_true)),
-        "R²": float(r2_score(y_true, y_pred)) if len(y_true) >= 2 else float("nan"),
-        "RMSE": compute_rmse(y_true, y_pred),
-        "MAE": float(mean_absolute_error(y_true, y_pred)),
-        "MAPE (%)": compute_mape(y_true, y_pred),
-        "AARD (%)": compute_mape(y_true, y_pred),
-    }
-    return statistics
-
-
-def normalize_uploaded_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Rename accepted aliases to the canonical SampleData.xlsx headers."""
-    normalized = frame.copy()
-    stripped_lookup = {str(col).strip(): col for col in normalized.columns}
-    rename_map: dict[Any, str] = {}
-
-    for canonical, aliases in COLUMN_ALIASES.items():
-        for alias in aliases:
-            source = stripped_lookup.get(alias.strip())
-            if source is not None:
-                rename_map[source] = canonical
-                break
-
-    return normalized.rename(columns=rename_map)
-
-
-def normalize_light_source(series: pd.Series) -> pd.Series:
-    def convert(value: Any) -> float:
-        if pd.isna(value):
-            return np.nan
-        if isinstance(value, str):
-            text = value.strip().lower()
-            if text in LIGHT_SOURCE_MAPPING:
-                return LIGHT_SOURCE_MAPPING[text]
-        numeric = pd.to_numeric(value, errors="coerce")
-        return float(numeric) if not pd.isna(numeric) else np.nan
-
-    return series.map(convert)
-
-
-def prepare_uploaded_data(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return cleaned display data and ordered numeric model inputs."""
-    frame = normalize_uploaded_columns(frame)
-
-    missing_inputs = [col for col in MODEL_INPUT_COLUMNS if col not in frame.columns]
-    if missing_inputs:
-        raise ValueError("Missing required columns: " + "; ".join(missing_inputs))
-
-    if TARGET_COL not in frame.columns:
-        raise ValueError(f"Missing required output column: {TARGET_COL}")
-
-    # Remove rows that have no model inputs at all.
-    nonempty_mask = ~frame[MODEL_INPUT_COLUMNS].isna().all(axis=1)
-    frame = frame.loc[nonempty_mask].copy().reset_index(drop=True)
-    if frame.empty:
-        raise ValueError("The uploaded file does not contain any populated data rows.")
-
-    ordered_inputs = frame[MODEL_INPUT_COLUMNS].copy()
-    ordered_inputs[LIGHT_COL] = normalize_light_source(ordered_inputs[LIGHT_COL])
-
-    for column in MODEL_INPUT_COLUMNS:
-        if column != LIGHT_COL:
-            ordered_inputs[column] = pd.to_numeric(ordered_inputs[column], errors="coerce")
-
-    invalid_mask = ordered_inputs.isna().any(axis=1)
-    if invalid_mask.any():
-        spreadsheet_rows = [str(index + 2) for index in ordered_inputs.index[invalid_mask][:20]]
-        raise ValueError(
-            f"{int(invalid_mask.sum())} row(s) contain missing or nonnumeric model inputs. "
-            "Correct spreadsheet row(s): " + ", ".join(spreadsheet_rows)
-        )
-
-    frame[TARGET_COL] = pd.to_numeric(frame[TARGET_COL], errors="coerce")
-    invalid_target = frame[TARGET_COL].isna()
-    if invalid_target.any():
-        spreadsheet_rows = [str(index + 2) for index in frame.index[invalid_target][:20]]
-        raise ValueError(
-            f"{int(invalid_target.sum())} row(s) contain a missing or nonnumeric output. "
-            "Correct the Degradation or Removal (%) value in spreadsheet row(s): "
-            + ", ".join(spreadsheet_rows)
-        )
-    frame[LIGHT_COL] = ordered_inputs[LIGHT_COL]
-
-    return frame, ordered_inputs
-
-
-def identify_domain_extrapolation(model_inputs: pd.DataFrame) -> tuple[pd.Series, list[str]]:
-    outside_any = pd.Series(False, index=model_inputs.index)
-    messages: list[str] = []
-
-    for column, (lower, upper) in TRAINING_DOMAIN.items():
-        outside = (model_inputs[column] < lower) | (model_inputs[column] > upper)
-        outside_any |= outside
-        if outside.any():
-            rows = ", ".join(str(index + 2) for index in model_inputs.index[outside][:12])
-            suffix = "..." if int(outside.sum()) > 12 else ""
-            messages.append(
-                f"{column}: {int(outside.sum())} value(s) outside [{lower:g}, {upper:g}] "
-                f"in spreadsheet row(s) {rows}{suffix}."
-            )
-
-    return outside_any, messages
-
-
-def create_excel_template() -> bytes:
-    """Return the exact SampleData.xlsx workbook supplied with the app."""
-    if not TEMPLATE_PATH.exists() or not TEMPLATE_PATH.is_file():
-        raise FileNotFoundError(
-            f"{TEMPLATE_FILENAME} is missing. Upload it beside app.py in the GitHub repository."
-        )
-    return TEMPLATE_PATH.read_bytes()
-
-
-def create_results_workbook(
-    results: pd.DataFrame,
-    statistics: dict[str, float] | None,
-    model_source: str,
-) -> bytes:
-    if statistics:
-        statistics_frame = pd.DataFrame(
-            {"Metric": list(statistics.keys()), "Value": list(statistics.values())}
-        )
-    else:
-        statistics_frame = pd.DataFrame(
-            {
-                "Metric": ["Validation statistics"],
-                "Value": ["Not calculated because experimental target values were not supplied."],
-            }
-        )
-
-    model_information = pd.DataFrame(
-        {
-            "Item": [
-                "Model",
-                "Model file",
-                "Model source",
-                "Prediction mode",
-                "Model input count",
-                "Light source coding",
-                "Generated at (UTC)",
-            ],
-            "Value": [
-                "XGBoost optimized using particle swarm optimization (XGB-PSO)",
-                MODEL_FILENAME,
-                model_source,
-                "Fixed saved model applied to unseen uploaded data",
-                len(MODEL_INPUT_COLUMNS),
-                "UV = 1; Visible light = 2; Simulated solar light = 3",
-                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-            ],
-        }
-    )
-
-    domain = pd.DataFrame(
-        [
-            {"Input": column, "Minimum": limits[0], "Maximum": limits[1]}
-            for column, limits in TRAINING_DOMAIN.items()
-        ]
-    )
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        results.to_excel(writer, sheet_name="Prediction Results", index=False)
-        statistics_frame.to_excel(writer, sheet_name="Uploaded Data Statistics", index=False)
-        FINAL_MODEL_METRICS.to_excel(writer, sheet_name="Final Model Performance", index=False)
-        model_information.to_excel(writer, sheet_name="Model Information", index=False)
-        domain.to_excel(writer, sheet_name="Training Domain", index=False)
-
-        for sheet_name in writer.book.sheetnames:
-            worksheet = writer.book[sheet_name]
-            worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
-            for cell in worksheet[1]:
-                updated_font = copy(cell.font)
-                updated_font.bold = True
-                cell.font = updated_font
-            for column_cells in worksheet.columns:
-                max_length = max(
-                    len(str(cell.value)) if cell.value is not None else 0
-                    for cell in column_cells
-                )
-                column_letter = column_cells[0].column_letter
-                worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
-
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-def make_validation_plot(
-    experimental: np.ndarray,
-    predicted: np.ndarray,
-    statistics: dict[str, float],
-):
-    figure, axis = plt.subplots(figsize=(7, 7))
-    axis.scatter(experimental, predicted, label="Uploaded validation data", s=38)
-
-    minimum = float(min(np.min(experimental), np.min(predicted)))
-    maximum = float(max(np.max(experimental), np.max(predicted)))
-    margin = max((maximum - minimum) * 0.05, 1.0)
-    lower = minimum - margin
-    upper = maximum + margin
-
-    axis.plot([lower, upper], [lower, upper], "--", label="45° line")
-
-    if len(experimental) >= 2 and np.ptp(experimental) > 0:
-        coefficients = np.polyfit(experimental, predicted, 1)
-        x_line = np.linspace(lower, upper, 100)
-        axis.plot(x_line, np.polyval(coefficients, x_line), label="Best-fit line")
-
-    r2_value = statistics.get("R²", float("nan"))
-    r2_text = "N/A" if np.isnan(r2_value) else f"{r2_value:.4f}"
-
-    axis.text(
-        0.05,
-        0.95,
-        f"R² = {r2_text}\n"
-        f"RMSE = {statistics['RMSE']:.4f}\n"
-        f"MAE = {statistics['MAE']:.4f}\n"
-        f"MAPE = {statistics['MAPE (%)']:.2f}%",
-        transform=axis.transAxes,
-        verticalalignment="top",
-        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
-    )
-
-    axis.set_xlim(lower, upper)
-    axis.set_ylim(lower, upper)
-    axis.set_xlabel("Experimental degradation or removal (%)")
-    axis.set_ylabel("Predicted degradation or removal (%)")
-    axis.set_title("XGB-PSO Experimental versus Predicted Values")
-    axis.legend()
-    axis.grid(False)
-    figure.tight_layout()
-    return figure
-
-
-def figure_to_png(figure) -> bytes:
-    buffer = io.BytesIO()
-    figure.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
-    buffer.seek(0)
-    return buffer.getvalue()
+LIGHT_SOURCE_MAP = {
+    "uv": 1.0,
+    "ultraviolet": 1.0,
+    "ultraviolet light": 1.0,
+    "visible": 2.0,
+    "visible light": 2.0,
+    "vis": 2.0,
+    "simulated solar": 3.0,
+    "simulated solar light": 3.0,
+    "solar": 3.0,
+    "solar light": 3.0,
+}
 
 
 # ============================================================
 # Session state
 # ============================================================
-if "prediction_run" not in st.session_state:
-    st.session_state.prediction_run = False
-if "attempt" not in st.session_state:
+DEFAULT_STATE: dict[str, Any] = {
+    "attempt": 0,
+    "model_trained": False,
+    "dataset_signature": None,
+}
+
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+def clear_model_results() -> None:
+    """Remove results when the uploaded dataset changes."""
+    keys_to_remove = [
+        "model",
+        "results_df",
+        "metrics_df",
+        "params_df",
+        "feature_importance_df",
+        "y_train",
+        "y_test",
+        "y_train_pred",
+        "y_test_pred",
+        "plot_png",
+        "excel_results",
+        "model_file",
+        "best_cv_r2",
+        "random_seed",
+        "model_name",
+    ]
+    for key in keys_to_remove:
+        st.session_state.pop(key, None)
+    st.session_state.model_trained = False
     st.session_state.attempt = 0
 
 
 # ============================================================
-# Load model
+# Utility functions
 # ============================================================
-st.sidebar.header("Saved Model")
-model_upload = st.sidebar.file_uploader(
-    "Upload the trusted XGB-PSO model if it is not stored with app.py",
-    type=["pkl", "joblib"],
-    help="Only upload a model file that you trust.",
-)
+def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
-model = None
-model_source = "Not loaded"
-try:
-    if model_upload is not None:
-        model = load_model_from_bytes(model_upload.getvalue())
-        model_source = f"Uploaded model: {model_upload.name}"
-    else:
-        available_path = find_model_path()
-        if available_path is not None:
-            model = load_model_from_path(str(available_path))
-            model_source = str(available_path)
-except Exception as error:
-    st.sidebar.error(f"Model loading failed: {error}")
 
-if model is not None:
-    st.sidebar.success("XGB-PSO model loaded")
-    expected = expected_feature_count(model)
-    st.sidebar.write(f"Expected inputs: {expected if expected is not None else 'not reported'}")
-else:
-    st.sidebar.warning(
-        f"Add {MODEL_FILENAME} beside app.py in GitHub, or upload it above."
+def compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """MAPE in %, excluding observations with a zero experimental value."""
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+    nonzero = np.abs(y_true) > np.finfo(float).eps
+    if not np.any(nonzero):
+        return float("nan")
+    return float(np.mean(np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero])) * 100)
+
+
+def calculate_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    dataset_name: str,
+) -> dict[str, Any]:
+    return {
+        "Dataset": dataset_name,
+        "Number of data points": int(len(y_true)),
+        "R2": float(r2_score(y_true, y_pred)) if len(y_true) >= 2 else float("nan"),
+        "RMSE": compute_rmse(y_true, y_pred),
+        "MAE": float(mean_absolute_error(y_true, y_pred)),
+        "MAPE (%)": compute_mape(y_true, y_pred),
+    }
+
+
+def encode_light_source(series: pd.Series) -> pd.Series:
+    """Accept numeric codes or common light-source text labels."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    text = series.astype(str).str.strip().str.lower().map(LIGHT_SOURCE_MAP)
+    encoded = numeric.fillna(text)
+    return encoded
+
+
+def create_fallback_template() -> bytes:
+    """Generate a template only when SampleData.xlsx is absent."""
+    output = io.BytesIO()
+    template_df = pd.DataFrame(columns=TEMPLATE_COLUMNS)
+    instructions_df = pd.DataFrame(
+        {
+            "Item": ["Light-source coding", "Output", "Required structure"],
+            "Instruction": [
+                "Use 1 = UV, 2 = visible light, or 3 = simulated solar light.",
+                "Enter the experimental degradation or removal percentage.",
+                "Keep the 11 input columns and the final output column unchanged.",
+            ],
+        }
+    )
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        template_df.to_excel(writer, sheet_name="Data Template", index=False)
+        instructions_df.to_excel(writer, sheet_name="Instructions", index=False)
+    output.seek(0)
+    return output.getvalue()
+
+
+def get_template_bytes() -> bytes:
+    template_path = Path(__file__).with_name("SampleData.xlsx")
+    if template_path.exists():
+        return template_path.read_bytes()
+    return create_fallback_template()
+
+
+def params_from_position(position: np.ndarray) -> dict[str, Any]:
+    """Convert a seven-dimensional PSO particle into valid XGBoost settings."""
+    return {
+        "n_estimators": int(np.clip(np.rint(position[0]), 50, 500)),
+        "learning_rate": float(np.clip(position[1], 0.01, 0.30)),
+        "subsample": float(np.clip(position[2], 0.50, 1.00)),
+        "max_depth": int(np.clip(np.rint(position[3]), 2, 15)),
+        "min_child_weight": float(np.clip(position[4], 1.0, 20.0)),
+        "gamma": float(np.clip(position[5], 0.0, 12.0)),
+        "colsample_bytree": float(np.clip(position[6], 0.30, 1.00)),
+    }
+
+
+def make_xgb_model(params: dict[str, Any], random_seed: int, n_jobs: int = 1) -> XGBRegressor:
+    return XGBRegressor(
+        **params,
+        objective="reg:squarederror",
+        random_state=random_seed,
+        n_jobs=n_jobs,
+        tree_method="hist",
+        verbosity=0,
     )
 
-with st.sidebar.expander("Final model performance"):
-    st.dataframe(FINAL_MODEL_METRICS, hide_index=True, use_container_width=True)
+
+def optimize_xgb_with_pso(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    *,
+    n_particles: int,
+    iterations: int,
+    c1: float,
+    c2: float,
+    inertia: float,
+    cv_folds: int,
+    random_seed: int,
+) -> tuple[dict[str, Any], float, pd.DataFrame]:
+    """A compact global-best PSO implementation that maximizes mean CV R²."""
+    lower = np.array([50, 0.01, 0.50, 2, 1.0, 0.0, 0.30], dtype=float)
+    upper = np.array([500, 0.30, 1.00, 15, 20.0, 12.0, 1.00], dtype=float)
+
+    rng = np.random.default_rng(random_seed)
+    positions = rng.uniform(lower, upper, size=(n_particles, len(lower)))
+    velocities = rng.uniform(
+        -0.10 * (upper - lower),
+        0.10 * (upper - lower),
+        size=positions.shape,
+    )
+
+    personal_best_positions = positions.copy()
+    personal_best_costs = np.full(n_particles, np.inf)
+    global_best_position = positions[0].copy()
+    global_best_cost = np.inf
+
+    splitter = KFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
+    progress_bar = st.progress(0)
+    progress_message = st.empty()
+    best_message = st.empty()
+    history: list[dict[str, float]] = []
+
+    def evaluate_particle(position: np.ndarray) -> float:
+        params = params_from_position(position)
+        model = make_xgb_model(params, random_seed=random_seed, n_jobs=1)
+        try:
+            scores = cross_val_score(
+                model,
+                X_train,
+                y_train,
+                cv=splitter,
+                scoring="r2",
+                n_jobs=1,
+                error_score=np.nan,
+            )
+            mean_score = float(np.nanmean(scores))
+            if not np.isfinite(mean_score):
+                return 1.0e9
+            return -mean_score
+        except Exception:
+            return 1.0e9
+
+    for iteration in range(iterations):
+        costs = np.array([evaluate_particle(position) for position in positions])
+
+        improved = costs < personal_best_costs
+        personal_best_costs[improved] = costs[improved]
+        personal_best_positions[improved] = positions[improved]
+
+        iteration_best_index = int(np.argmin(costs))
+        if costs[iteration_best_index] < global_best_cost:
+            global_best_cost = float(costs[iteration_best_index])
+            global_best_position = positions[iteration_best_index].copy()
+
+        current_best_r2 = -global_best_cost
+        history.append({"Iteration": iteration + 1, "Best CV R2": current_best_r2})
+
+        completed = int(100 * (iteration + 1) / iterations)
+        progress_bar.progress(completed)
+        progress_message.write(
+            f"PSO progress: **{iteration + 1}/{iterations} iterations** ({completed}%)"
+        )
+        best_message.write(f"Best cross-validation R²: **{current_best_r2:.4f}**")
+
+        r1 = rng.random(size=positions.shape)
+        r2 = rng.random(size=positions.shape)
+        velocities = (
+            inertia * velocities
+            + c1 * r1 * (personal_best_positions - positions)
+            + c2 * r2 * (global_best_position - positions)
+        )
+        positions = np.clip(positions + velocities, lower, upper)
+
+    progress_message.success("PSO hyperparameter optimization completed.")
+    return (
+        params_from_position(global_best_position),
+        float(-global_best_cost),
+        pd.DataFrame(history),
+    )
+
+
+def create_r2_plot(
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    y_train_pred: np.ndarray,
+    y_test_pred: np.ndarray,
+    r2_train: float,
+    r2_test: float,
+    r2_all: float,
+    model_name: str,
+) -> tuple[plt.Figure, bytes]:
+    y_all = np.concatenate([y_train, y_test])
+    y_all_pred = np.concatenate([y_train_pred, y_test_pred])
+
+    fig, ax = plt.subplots(figsize=(7.2, 7.2))
+    ax.scatter(
+        y_train,
+        y_train_pred,
+        label="Train data",
+        s=34,
+        marker="o",
+        facecolors="none",
+        edgecolors="#E6A56A",
+        linewidths=1.0,
+        alpha=0.85,
+    )
+    ax.scatter(
+        y_test,
+        y_test_pred,
+        label="Test data",
+        s=36,
+        marker="o",
+        color="#423C9B",
+        alpha=0.85,
+    )
+
+    minimum = float(min(np.min(y_all), np.min(y_all_pred)))
+    maximum = float(max(np.max(y_all), np.max(y_all_pred)))
+    span = maximum - minimum
+    margin = 0.05 * span if span > 0 else 1.0
+    low = minimum - margin
+    high = maximum + margin
+
+    ax.plot([low, high], [low, high], "--", color="#315BB5", linewidth=1.4, label="45° line")
+
+    if len(np.unique(y_all)) >= 2:
+        slope, intercept = np.polyfit(y_all, y_all_pred, 1)
+        x_line = np.linspace(low, high, 200)
+        ax.plot(x_line, slope * x_line + intercept, color="black", linewidth=1.5, label="Best-fit line")
+
+    ax.set_xlim(low, high)
+    ax.set_ylim(low, high)
+    ax.set_xlabel("Experimental Degradation or Removal (%)", fontsize=11)
+    ax.set_ylabel("Predicted Degradation or Removal (%)", fontsize=11)
+    ax.set_title(f"{model_name} Model", fontsize=14)
+    ax.text(
+        0.04,
+        0.96,
+        f"Train R² = {r2_train:.4f}\nTest R² = {r2_test:.4f}\nTotal R² = {r2_all:.4f}",
+        transform=ax.transAxes,
+        va="top",
+        fontsize=10.5,
+        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+    )
+    ax.legend(loc="lower right")
+    ax.grid(False)
+    fig.tight_layout()
+
+    png_buffer = io.BytesIO()
+    fig.savefig(png_buffer, format="png", dpi=300, bbox_inches="tight")
+    png_buffer.seek(0)
+    return fig, png_buffer.getvalue()
+
+
+def create_feature_importance_plot(feature_importance_df: pd.DataFrame) -> plt.Figure:
+    plot_df = feature_importance_df.sort_values("Importance", ascending=True)
+    fig, ax = plt.subplots(figsize=(8, 5.8))
+    ax.barh(plot_df["Input variable"], plot_df["Importance"])
+    ax.set_xlabel("XGBoost feature importance")
+    ax.set_ylabel("Input variable")
+    ax.set_title("Feature Importance of the Developed Model")
+    ax.grid(False)
+    fig.tight_layout()
+    return fig
+
+
+def create_excel_results(
+    results_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    params_df: pd.DataFrame,
+    feature_importance_df: pd.DataFrame,
+    pso_history_df: pd.DataFrame,
+) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        results_df.to_excel(writer, sheet_name="Predictions", index=False)
+        metrics_df.to_excel(writer, sheet_name="Statistical Results", index=False)
+        params_df.to_excel(writer, sheet_name="Hyperparameters", index=False)
+        feature_importance_df.to_excel(writer, sheet_name="Feature Importance", index=False)
+        if not pso_history_df.empty:
+            pso_history_df.to_excel(writer, sheet_name="PSO Progress", index=False)
+    output.seek(0)
+    return output.getvalue()
+
+
+def create_model_download(model: XGBRegressor) -> bytes:
+    output = io.BytesIO()
+    joblib.dump(model, output)
+    output.seek(0)
+    return output.getvalue()
 
 
 # ============================================================
-# Step 1: Download Excel template
+# Step 1: Template download
 # ============================================================
-st.subheader("Step 1: Download Excel Template")
-
-try:
-    template_bytes = create_excel_template()
-except FileNotFoundError as error:
-    template_bytes = None
-    st.error(str(error))
+st.subheader("Step 1: Download the Excel Data Template")
 
 st.download_button(
-    label="Download SampleData Excel Template",
-    data=template_bytes if template_bytes is not None else b"",
-    file_name=TEMPLATE_FILENAME,
+    label="Download SampleData.xlsx",
+    data=get_template_bytes(),
+    file_name="SampleData.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    disabled=template_bytes is None,
 )
 
 st.info(
-    "The workbook contains exactly 11 numerical model inputs and one experimental output. "
-    "Fill every column for each row. The application predicts degradation/removal and "
-    "calculates R², RMSE, MAE, MAPE, AARD, residuals, and the validation plot."
+    "The workbook contains exactly 11 model inputs and one output. Use the final column, "
+    f"'{OUTPUT_COLUMN}', for the measured experimental result. Light-source coding: "
+    "1 = UV, 2 = visible light, and 3 = simulated solar light. Text labels are also accepted."
 )
 
 
 # ============================================================
-# Step 2: Upload completed file
+# Step 2: Upload and validate dataset
 # ============================================================
-st.subheader("Step 2: Upload Completed Excel File")
+st.subheader("Step 2: Upload the Completed Excel Dataset")
 
 uploaded_file = st.file_uploader(
-    "Upload the completed Excel or CSV file",
-    type=["xlsx", "csv"],
-    key="experimental_data_upload",
+    "Upload the completed SampleData.xlsx file",
+    type=["xlsx"],
 )
 
 if uploaded_file is None:
-    st.warning("Please upload the completed Excel file after filling the template.")
+    st.warning("Download the template, enter the complete dataset, and upload the completed Excel file.")
     st.stop()
+
+uploaded_bytes = uploaded_file.getvalue()
+current_signature = hashlib.sha256(uploaded_bytes).hexdigest()
+if st.session_state.dataset_signature != current_signature:
+    clear_model_results()
+    st.session_state.dataset_signature = current_signature
 
 try:
-    if uploaded_file.name.lower().endswith(".csv"):
-        raw_data = pd.read_csv(uploaded_file)
-    else:
-        raw_data = pd.read_excel(uploaded_file, sheet_name=0)
-
-    display_data, model_inputs = prepare_uploaded_data(raw_data)
-except Exception as error:
-    st.error(f"The uploaded file could not be processed: {error}")
+    raw_df = pd.read_excel(io.BytesIO(uploaded_bytes))
+except Exception as exc:
+    st.error(f"The uploaded Excel file could not be read: {exc}")
     st.stop()
 
-st.success("Excel file uploaded and validated successfully.")
-st.write(f"Valid uploaded rows: **{len(display_data)}**")
-st.dataframe(display_data.head(25), use_container_width=True, hide_index=True)
+missing_columns = [column for column in TEMPLATE_COLUMNS if column not in raw_df.columns]
+if missing_columns:
+    st.error("The uploaded workbook does not match the required 11-input/1-output template.")
+    st.write("Missing columns:")
+    st.code("\n".join(missing_columns))
+    st.write("Required columns in order:")
+    st.dataframe(pd.DataFrame({"Required column": TEMPLATE_COLUMNS}), use_container_width=True)
+    st.stop()
 
-outside_domain, domain_messages = identify_domain_extrapolation(model_inputs)
-if domain_messages:
-    with st.expander("Training-domain warnings", expanded=True):
-        for message in domain_messages:
-            st.warning(message)
-else:
-    st.success("All uploaded input values are within the individual model training ranges.")
+working_df = raw_df[TEMPLATE_COLUMNS].copy()
+working_df["Light source"] = encode_light_source(working_df["Light source"])
+for column in TEMPLATE_COLUMNS:
+    if column != "Light source":
+        working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
+
+invalid_light = ~working_df["Light source"].isin([1.0, 2.0, 3.0])
+working_df.loc[invalid_light, "Light source"] = np.nan
+
+rows_before = len(working_df)
+working_df = working_df.dropna(subset=TEMPLATE_COLUMNS).reset_index(drop=True)
+removed_rows = rows_before - len(working_df)
+
+if len(working_df) < 10:
+    st.error(
+        "At least 10 complete numerical rows are required to develop the model. "
+        f"Only {len(working_df)} valid rows were detected."
+    )
+    st.stop()
+
+st.success(f"Excel dataset uploaded successfully: {len(working_df)} valid rows.")
+if removed_rows:
+    st.warning(f"{removed_rows} incomplete or invalid rows were excluded before modelling.")
+
+with st.expander("Preview the validated modelling dataset", expanded=True):
+    st.dataframe(working_df.head(20), use_container_width=True)
 
 
 # ============================================================
-# Step 3: Model settings/information
+# Step 3: Model settings
 # ============================================================
-st.subheader("Step 3: Confirm Model Application")
+st.subheader("Step 3: Select the XGBoost–PSO Model Settings")
 
-left_info, middle_info, right_info = st.columns(3)
-left_info.metric("Uploaded rows", len(display_data))
-middle_info.metric("Numerical model inputs", len(MODEL_INPUT_COLUMNS))
-right_info.metric("Rows outside training ranges", int(outside_domain.sum()))
+train_percent = st.slider(
+    "Training data percentage (%)",
+    min_value=50,
+    max_value=90,
+    value=85,
+    step=5,
+)
+test_percent = 100 - train_percent
+st.write(f"Selected data division: **{train_percent}% training / {test_percent}% testing**")
 
-st.write(
-    "The final saved XGB-PSO model will be applied directly to every uploaded row. "
-    "The uploaded observations remain unseen validation/prediction data and are not used for retraining."
+estimated_test_rows = int(np.ceil(len(working_df) * test_percent / 100.0))
+if estimated_test_rows < 2:
+    st.error("The selected split produces fewer than two test observations. Reduce the training percentage.")
+    st.stop()
+
+st.sidebar.header("Model Development Settings")
+use_pso = st.sidebar.checkbox("Use PSO hyperparameter optimization", value=True)
+base_seed = int(
+    st.sidebar.number_input(
+        "Base random seed",
+        min_value=0,
+        max_value=2_000_000_000,
+        value=605,
+        step=1,
+    )
+)
+change_seed_each_attempt = st.sidebar.checkbox(
+    "Use a new train/test split on each rerun",
+    value=True,
 )
 
-with st.expander("Show the exact 11 ordered model inputs"):
-    st.caption(
-        "Columns 1–11 are passed to the model in the order shown. Column 12 is the experimental output used for validation."
+if use_pso:
+    st.sidebar.subheader("PSO Settings")
+    n_particles = st.sidebar.slider("Number of particles", 5, 30, 5, 5)
+    pso_iterations = st.sidebar.slider("PSO iterations", 5, 100, 30, 5)
+    c1 = st.sidebar.number_input("Cognitive coefficient (c1)", 0.1, 5.0, 1.5, 0.1)
+    c2 = st.sidebar.number_input("Social coefficient (c2)", 0.1, 5.0, 1.5, 0.1)
+    inertia = st.sidebar.number_input("Inertia weight (w)", 0.1, 1.5, 0.7, 0.1)
+    cv_folds_requested = st.sidebar.slider("Cross-validation folds", 2, 10, 5, 1)
+    st.sidebar.caption(
+        "The manuscript settings were 5 particles, 100 iterations, c1 = 1.5, "
+        "c2 = 1.5 and w = 0.7. Fewer iterations run faster on Streamlit Cloud."
     )
-    ordered_preview = model_inputs.copy()
-    ordered_preview.columns = [f"{index + 1}. {column}" for index, column in enumerate(ordered_preview.columns)]
-    st.dataframe(ordered_preview.head(25), use_container_width=True, hide_index=True)
+else:
+    st.sidebar.subheader("Manual XGBoost Hyperparameters")
+    n_estimators = st.sidebar.slider("n_estimators", 50, 1000, 168, 10)
+    learning_rate = st.sidebar.slider("learning_rate", 0.001, 0.300, 0.193, 0.001, format="%.3f")
+    subsample = st.sidebar.slider("subsample", 0.50, 1.00, 0.718, 0.01)
+    max_depth = st.sidebar.slider("max_depth", 1, 20, 9, 1)
+    min_child_weight = st.sidebar.slider("min_child_weight", 0.1, 20.0, 4.7, 0.1)
+    gamma = st.sidebar.slider("gamma", 0.0, 15.0, 8.1, 0.1)
+    colsample_bytree = st.sidebar.slider("colsample_bytree", 0.30, 1.00, 0.945, 0.005)
 
 
 # ============================================================
-# Step 4: Run/rerun prediction
+# Step 4: Develop model
 # ============================================================
-st.subheader("Step 4: Run or Rerun XGB-PSO Model")
-run_model = st.button("Run / Rerun XGB-PSO Prediction", type="primary")
+st.subheader("Step 4: Develop or Redevelop the XGBoost–PSO Model")
+
+run_model = st.button("Develop / Redevelop XGBoost–PSO Model", type="primary")
 
 if run_model:
-    if model is None:
-        st.error(
-            f"The model is not loaded. Upload {MODEL_FILENAME} in the sidebar or place it beside app.py."
-        )
+    st.session_state.attempt += 1
+    if change_seed_each_attempt:
+        random_seed = base_seed + st.session_state.attempt - 1
     else:
-        try:
-            predictions = predict_with_saved_model(model, model_inputs)
+        random_seed = base_seed
 
-            results = display_data.copy()
-            results[PREDICTION_COL] = predictions
-            results[DOMAIN_COL] = outside_domain.to_numpy()
+    X = working_df[INPUT_COLUMNS].to_numpy(dtype=float)
+    y = working_df[OUTPUT_COLUMN].to_numpy(dtype=float)
+    row_indices = np.arange(len(working_df))
 
-            actual_mask = results[TARGET_COL].notna()
-            statistics = None
-            validation_actual = None
-            validation_predicted = None
-
-            results[RESIDUAL_COL] = np.nan
-            results[ABS_ERROR_COL] = np.nan
-            results[REL_ERROR_COL] = np.nan
-
-            if actual_mask.any():
-                validation_actual = results.loc[actual_mask, TARGET_COL].to_numpy(dtype=float)
-                validation_predicted = results.loc[actual_mask, PREDICTION_COL].to_numpy(dtype=float)
-                statistics = compute_statistics(validation_actual, validation_predicted)
-
-                residuals = validation_actual - validation_predicted
-                absolute_errors = np.abs(residuals)
-                relative_errors = np.divide(
-                    absolute_errors,
-                    np.abs(validation_actual),
-                    out=np.full_like(absolute_errors, np.nan, dtype=float),
-                    where=np.abs(validation_actual) > 0,
-                ) * 100
-
-                results.loc[actual_mask, RESIDUAL_COL] = residuals
-                results.loc[actual_mask, ABS_ERROR_COL] = absolute_errors
-                results.loc[actual_mask, REL_ERROR_COL] = relative_errors
-
-            st.session_state.attempt += 1
-            st.session_state.prediction_run = True
-            st.session_state.results = results
-            st.session_state.statistics = statistics
-            st.session_state.validation_actual = validation_actual
-            st.session_state.validation_predicted = validation_predicted
-            st.session_state.model_source = model_source
-        except Exception as error:
-            st.error(f"Prediction failed: {error}")
-
-
-# ============================================================
-# Display saved results after button/download reruns
-# ============================================================
-if st.session_state.prediction_run:
-    results = st.session_state.results
-    statistics = st.session_state.statistics
-
-    st.subheader("Model Results")
-    st.write(f"Prediction attempt number: **{st.session_state.attempt}**")
-
-    if statistics is not None:
-        r2_value = statistics["R²"]
-        r2_display = "N/A" if np.isnan(r2_value) else f"{r2_value:.4f}"
-
-        metric_1, metric_2, metric_3 = st.columns(3)
-        metric_1.metric("Validation R²", r2_display)
-        metric_2.metric("Validation RMSE", f"{statistics['RMSE']:.4f}")
-        metric_3.metric("Validation MAE", f"{statistics['MAE']:.4f}")
-
-        metric_4, metric_5, metric_6 = st.columns(3)
-        metric_4.metric("Validation MAPE (%)", f"{statistics['MAPE (%)']:.2f}")
-        metric_5.metric("Validation AARD (%)", f"{statistics['AARD (%)']:.2f}")
-        metric_6.metric("Experimental rows", int(statistics["Number of validation rows"]))
-    else:
-        st.info(
-            "The experimental output is required for validation."
+    try:
+        X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
+            X,
+            y,
+            row_indices,
+            train_size=train_percent / 100.0,
+            random_state=random_seed,
+            shuffle=True,
         )
+    except Exception as exc:
+        st.error(f"The train/test split could not be created: {exc}")
+        st.stop()
 
-    st.subheader("Prediction Results")
-    st.dataframe(results, use_container_width=True, hide_index=True)
+    if len(y_test) < 2:
+        st.error("The test subset contains fewer than two observations; R² cannot be calculated.")
+        st.stop()
 
-    plot_png = None
-    if statistics is not None:
-        st.subheader("Experimental-versus-Predicted Plot")
-        validation_figure = make_validation_plot(
-            st.session_state.validation_actual,
-            st.session_state.validation_predicted,
-            statistics,
-        )
-        st.pyplot(validation_figure, use_container_width=False)
-        plot_png = figure_to_png(validation_figure)
-        plt.close(validation_figure)
+    pso_history_df = pd.DataFrame()
+    best_cv_r2 = float("nan")
 
-    st.subheader("Download Results")
-    excel_results = create_results_workbook(
-        results,
-        statistics,
-        st.session_state.model_source,
+    with st.spinner("Developing the model. This may take several minutes when PSO is enabled..."):
+        if use_pso:
+            # R² requires at least two observations in each validation fold.
+            effective_cv = min(cv_folds_requested, max(2, len(y_train) // 2))
+            if effective_cv < 2:
+                st.error("Insufficient training observations for cross-validation.")
+                st.stop()
+            best_params, best_cv_r2, pso_history_df = optimize_xgb_with_pso(
+                X_train,
+                y_train,
+                n_particles=n_particles,
+                iterations=pso_iterations,
+                c1=float(c1),
+                c2=float(c2),
+                inertia=float(inertia),
+                cv_folds=effective_cv,
+                random_seed=random_seed,
+            )
+            model_name = "XGBoost–PSO"
+        else:
+            best_params = {
+                "n_estimators": int(n_estimators),
+                "learning_rate": float(learning_rate),
+                "subsample": float(subsample),
+                "max_depth": int(max_depth),
+                "min_child_weight": float(min_child_weight),
+                "gamma": float(gamma),
+                "colsample_bytree": float(colsample_bytree),
+            }
+            model_name = "XGBoost"
+
+        model = make_xgb_model(best_params, random_seed=random_seed, n_jobs=-1)
+        model.fit(X_train, y_train)
+
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+    y_all_pred = model.predict(X)
+
+    train_metrics = calculate_metrics(y_train, y_train_pred, "Train")
+    test_metrics = calculate_metrics(y_test, y_test_pred, "Test")
+    total_metrics = calculate_metrics(y, y_all_pred, "Total")
+    metrics_df = pd.DataFrame([train_metrics, test_metrics, total_metrics])
+
+    results_df = working_df.copy()
+    results_df["Predicted Degradation or Removal (%)"] = y_all_pred
+    results_df["Residual (Experimental - Predicted)"] = y - y_all_pred
+    results_df["Absolute Error"] = np.abs(y - y_all_pred)
+    results_df["Data Set"] = ""
+    results_df.loc[train_indices, "Data Set"] = "Train"
+    results_df.loc[test_indices, "Data Set"] = "Test"
+
+    pso_settings = {
+        "Use PSO": use_pso,
+        "Particles": n_particles if use_pso else None,
+        "PSO iterations": pso_iterations if use_pso else None,
+        "c1": float(c1) if use_pso else None,
+        "c2": float(c2) if use_pso else None,
+        "w": float(inertia) if use_pso else None,
+        "CV folds": effective_cv if use_pso else None,
+        "Best CV R2": best_cv_r2 if use_pso else None,
+    }
+    params_df = pd.DataFrame(
+        [
+            {
+                **best_params,
+                **pso_settings,
+                "Random seed": random_seed,
+                "Training percentage": train_percent,
+                "Testing percentage": test_percent,
+                "Total valid rows": len(working_df),
+            }
+        ]
     )
 
-    download_col_1, download_col_2 = st.columns(2)
-    with download_col_1:
-        st.download_button(
-            label="Download Excel Results",
-            data=excel_results,
-            file_name="XGB_PSO_Pharmaceutical_Prediction_Results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    feature_importance_df = pd.DataFrame(
+        {
+            "Input variable": INPUT_COLUMNS,
+            "Importance": model.feature_importances_,
+        }
+    ).sort_values("Importance", ascending=False, ignore_index=True)
+
+    fig, plot_png = create_r2_plot(
+        y_train,
+        y_test,
+        y_train_pred,
+        y_test_pred,
+        train_metrics["R2"],
+        test_metrics["R2"],
+        total_metrics["R2"],
+        model_name,
+    )
+    plt.close(fig)
+
+    excel_results = create_excel_results(
+        results_df,
+        metrics_df,
+        params_df,
+        feature_importance_df,
+        pso_history_df,
+    )
+    model_file = create_model_download(model)
+
+    st.session_state.model_trained = True
+    st.session_state.model = model
+    st.session_state.results_df = results_df
+    st.session_state.metrics_df = metrics_df
+    st.session_state.params_df = params_df
+    st.session_state.feature_importance_df = feature_importance_df
+    st.session_state.pso_history_df = pso_history_df
+    st.session_state.y_train = y_train
+    st.session_state.y_test = y_test
+    st.session_state.y_train_pred = y_train_pred
+    st.session_state.y_test_pred = y_test_pred
+    st.session_state.plot_png = plot_png
+    st.session_state.excel_results = excel_results
+    st.session_state.model_file = model_file
+    st.session_state.best_cv_r2 = best_cv_r2
+    st.session_state.random_seed = random_seed
+    st.session_state.model_name = model_name
+
+
+# ============================================================
+# Results remain visible after download-button reruns
+# ============================================================
+if st.session_state.model_trained:
+    metrics_df = st.session_state.metrics_df
+    train_row = metrics_df.loc[metrics_df["Dataset"] == "Train"].iloc[0]
+    test_row = metrics_df.loc[metrics_df["Dataset"] == "Test"].iloc[0]
+    total_row = metrics_df.loc[metrics_df["Dataset"] == "Total"].iloc[0]
+
+    st.divider()
+    st.header("Developed Model Results")
+    st.write(
+        f"Model: **{st.session_state.model_name}** | "
+        f"Attempt: **{st.session_state.attempt}** | "
+        f"Random seed: **{st.session_state.random_seed}**"
+    )
+
+    if np.isfinite(st.session_state.best_cv_r2):
+        st.metric("Best PSO cross-validation R²", f"{st.session_state.best_cv_r2:.4f}")
+
+    st.subheader("Statistical Performance")
+    r2_cols = st.columns(3)
+    r2_cols[0].metric("Train R²", f"{train_row['R2']:.4f}")
+    r2_cols[1].metric("Test R²", f"{test_row['R2']:.4f}")
+    r2_cols[2].metric("Total R²", f"{total_row['R2']:.4f}")
+
+    rmse_cols = st.columns(3)
+    rmse_cols[0].metric("Train RMSE", f"{train_row['RMSE']:.4f}")
+    rmse_cols[1].metric("Test RMSE", f"{test_row['RMSE']:.4f}")
+    rmse_cols[2].metric("Total RMSE", f"{total_row['RMSE']:.4f}")
+
+    mae_cols = st.columns(3)
+    mae_cols[0].metric("Train MAE", f"{train_row['MAE']:.4f}")
+    mae_cols[1].metric("Test MAE", f"{test_row['MAE']:.4f}")
+    mae_cols[2].metric("Total MAE", f"{total_row['MAE']:.4f}")
+
+    mape_cols = st.columns(3)
+    mape_cols[0].metric("Train MAPE (%)", f"{train_row['MAPE (%)']:.2f}")
+    mape_cols[1].metric("Test MAPE (%)", f"{test_row['MAPE (%)']:.2f}")
+    mape_cols[2].metric("Total MAPE (%)", f"{total_row['MAPE (%)']:.2f}")
+
+    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Experimental versus Predicted Plot")
+    st.image(st.session_state.plot_png, use_container_width=False)
+
+    st.subheader("Optimized Model Hyperparameters")
+    st.dataframe(st.session_state.params_df, use_container_width=True, hide_index=True)
+
+    with st.expander("Prediction results", expanded=False):
+        st.dataframe(st.session_state.results_df, use_container_width=True)
+
+    with st.expander("Feature importance", expanded=False):
+        st.dataframe(st.session_state.feature_importance_df, use_container_width=True, hide_index=True)
+        importance_fig = create_feature_importance_plot(st.session_state.feature_importance_df)
+        st.pyplot(importance_fig)
+        plt.close(importance_fig)
+
+    if not st.session_state.pso_history_df.empty:
+        with st.expander("PSO convergence history", expanded=False):
+            st.line_chart(
+                st.session_state.pso_history_df.set_index("Iteration")["Best CV R2"]
+            )
+            st.dataframe(st.session_state.pso_history_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Download the Developed Model and Results")
+    download_cols = st.columns(3)
+    download_cols[0].download_button(
+        "Download Excel Results",
+        data=st.session_state.excel_results,
+        file_name="XGBoost_PSO_Modeling_Results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    download_cols[1].download_button(
+        "Download Trained Model",
+        data=st.session_state.model_file,
+        file_name="Trained_XGBoost_PSO_Model.pkl",
+        mime="application/octet-stream",
+    )
+    download_cols[2].download_button(
+        "Download R² Plot",
+        data=st.session_state.plot_png,
+        file_name="XGBoost_PSO_R2_Plot.png",
+        mime="image/png",
+    )
+
+    if not np.isfinite(float(test_row["R2"])):
+        st.warning("Test R² could not be calculated for the current test subset.")
+    elif float(test_row["R2"]) < 0.80:
+        st.warning(
+            "The test R² is below 0.80. Review the dataset and PSO settings, or click "
+            "Develop / Redevelop XGBoost–PSO Model to evaluate another train/test split."
         )
-
-    if plot_png is not None:
-        with download_col_2:
-            st.download_button(
-                label="Download Validation Plot",
-                data=plot_png,
-                file_name="XGB_PSO_Experimental_vs_Predicted.png",
-                mime="image/png",
-            )
-
-    if statistics is not None and not np.isnan(statistics["R²"]):
-        if statistics["R²"] >= 0.80:
-            st.success("The saved XGB-PSO model shows acceptable agreement for the uploaded validation data.")
-        else:
-            st.warning(
-                "The validation R² is below 0.80. Check the input units, light-source coding, "
-                "experimental values, and training-domain warnings."
-            )
+    else:
+        st.success("The developed model shows acceptable test-set performance for the current split.")

@@ -1,10 +1,10 @@
-# XGB-PSO Pharmaceutical Removal Streamlit App
+# XGBoost–PSO Pharmaceutical Photodegradation Model Development App
 
-This app applies the saved `XGBPSOModel_success_seed605.pkl` model to an uploaded Excel workbook.
+This Streamlit application develops a new XGBoost model from a user-uploaded Excel dataset. It does **not** load the previously saved `.pkl` model.
 
-## Required Excel structure
+## Excel structure
 
-The first worksheet must contain exactly 11 model inputs followed by 1 experimental output:
+The workbook contains exactly 11 inputs and 1 output:
 
 1. BET specific surface area (m2 g-1)
 2. Oxidant concentration (mM)
@@ -17,16 +17,42 @@ The first worksheet must contain exactly 11 model inputs followed by 1 experimen
 9. Light source
 10. Catalyst dosage (mg/L)
 11. t (min)
-12. Degradation or Removal (%) — experimental output
+12. Degradation or Removal (%) — output
 
-Light-source coding: UV = 1, visible light = 2, simulated solar light = 3. Text labels are also accepted.
+Light source coding: `1 = UV`, `2 = visible light`, `3 = simulated solar light`.
 
-## Repository files
+## Main workflow
+
+1. Download `SampleData.xlsx` from the app.
+2. Enter the full modelling dataset and upload it.
+3. Choose the train/test split.
+4. Enable PSO and select particles, iterations and CV folds.
+5. Develop/redevelop the XGBoost–PSO model.
+6. Review train/test/total R², RMSE, MAE and MAPE, the R² plot, feature importance and optimized hyperparameters.
+7. Download the Excel results, trained `.pkl` model and R² plot.
+
+## Streamlit deployment files
+
+Upload these files to the same GitHub repository:
 
 - `app.py`
 - `SampleData.xlsx`
 - `requirements.txt`
 - `runtime.txt`
-- `XGBPSOModel_success_seed605.pkl`
 
-The app downloads `SampleData.xlsx`, accepts the completed workbook, generates XGB-PSO predictions, calculates validation statistics, plots experimental versus predicted values, and exports the results to Excel.
+No pre-trained model file is required because the model is trained from the uploaded Excel dataset.
+
+## Local run
+
+```bash
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+## Computational note
+
+PSO runtime is approximately proportional to:
+
+`particles × iterations × cross-validation folds`
+
+The manuscript used 5 particles and 100 iterations. The app defaults to 30 iterations so it is more practical on Streamlit Community Cloud; users can select 100 iterations when needed.
