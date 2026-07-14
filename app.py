@@ -17,9 +17,153 @@ METADATA_PATH = APP_DIR / "model_metadata.json"
 METRICS_PATH = APP_DIR / "model_metrics.csv"
 VALIDATION_PATH = APP_DIR / "validation_predictions.csv"
 
-with METADATA_PATH.open("r", encoding="utf-8") as f:
-    META = json.load(f)
+# Embedded fallback makes app.py deployable even when the optional metadata
+# file was not uploaded to GitHub/Streamlit Community Cloud.
+DEFAULT_META = {
+    "model_filename": "XGBPSOModel_success_seed605.pkl",
+    "model_name": "XGB–PSO model for pharmaceutical photodegradation",
+    "seed": 605,
+    "data_points": 1103,
+    "training_points": 938,
+    "testing_points": 165,
+    "target": "Degradation (%)",
+    "feature_order_note": "The listed order must not be changed because it matches the saved model input matrix.",
+    "light_source_codes": {
+        "UV": 1,
+        "Visible light": 2,
+        "Simulated solar light": 3
+    },
+    "features": [
+        {
+            "key": "BET",
+            "column": "BET specific surface area (m²/g)",
+            "label": "BET specific surface area",
+            "unit": "m²/g",
+            "min": 5.686,
+            "max": 733.03,
+            "default": 100.0,
+            "help": "Specific surface area of the photocatalyst."
+        },
+        {
+            "key": "C_oxidant",
+            "column": "Oxidant concentration (mM)",
+            "label": "Oxidant concentration",
+            "unit": "mM",
+            "min": 0.0,
+            "max": 8.0,
+            "default": 0.0,
+            "help": "Use 0 when no oxidant is present."
+        },
+        {
+            "key": "MW",
+            "column": "Molecular weight (g/mol)",
+            "label": "Molecular weight",
+            "unit": "g/mol",
+            "min": 151.16,
+            "max": 480.9,
+            "default": 444.4,
+            "help": "Molecular weight of the pharmaceutical pollutant."
+        },
+        {
+            "key": "HBDC",
+            "column": "HBDC",
+            "label": "Hydrogen-bond donor count (HBDC)",
+            "unit": "",
+            "min": 1.0,
+            "max": 7.0,
+            "default": 6.0,
+            "help": "Hydrogen-bond donor count from a consistent molecular database such as PubChem."
+        },
+        {
+            "key": "HBAC",
+            "column": "HBAC",
+            "label": "Hydrogen-bond acceptor count (HBAC)",
+            "unit": "",
+            "min": 1.0,
+            "max": 12.0,
+            "default": 9.0,
+            "help": "Hydrogen-bond acceptor count from a consistent molecular database such as PubChem."
+        },
+        {
+            "key": "TPSA",
+            "column": "TPSA (Å²)",
+            "label": "Topological polar surface area (TPSA)",
+            "unit": "Å²",
+            "min": 37.3,
+            "max": 235.0,
+            "default": 182.0,
+            "help": "Topological polar surface area of the pharmaceutical pollutant."
+        },
+        {
+            "key": "C0",
+            "column": "Initial pollutant concentration, C0 (mg/L)",
+            "label": "Initial pollutant concentration, C₀",
+            "unit": "mg/L",
+            "min": 0.5,
+            "max": 200.0,
+            "default": 20.0,
+            "help": "Initial pharmaceutical concentration before irradiation."
+        },
+        {
+            "key": "pH",
+            "column": "Solution pH",
+            "label": "Solution pH",
+            "unit": "",
+            "min": 1.0,
+            "max": 11.5,
+            "default": 7.0,
+            "help": "Initial or controlled solution pH used in the experiment."
+        },
+        {
+            "key": "Light",
+            "column": "Light source code",
+            "label": "Light source",
+            "unit": "",
+            "min": 1.0,
+            "max": 3.0,
+            "default": 2.0,
+            "help": "Coding used during model development: UV = 1, visible = 2, simulated solar = 3."
+        },
+        {
+            "key": "C_photocatalyst",
+            "column": "Photocatalyst dosage (mg/L)",
+            "label": "Photocatalyst dosage",
+            "unit": "mg/L",
+            "min": 50.0,
+            "max": 8000.0,
+            "default": 500.0,
+            "help": "Mass concentration of photocatalyst in the reaction solution."
+        },
+        {
+            "key": "Time",
+            "column": "Reaction time (min)",
+            "label": "Reaction time",
+            "unit": "min",
+            "min": 0.5,
+            "max": 2880.0,
+            "default": 60.0,
+            "help": "Photocatalytic irradiation time."
+        }
+    ]
+}
 
+
+def load_metadata() -> dict[str, Any]:
+    if not METADATA_PATH.exists():
+        return DEFAULT_META
+    try:
+        with METADATA_PATH.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if "features" not in loaded or "model_filename" not in loaded:
+            raise ValueError("Required metadata keys are missing.")
+        return loaded
+    except (OSError, json.JSONDecodeError, ValueError):
+        # Keep startup robust: invalid or incomplete optional metadata should
+        # never prevent the app from opening.
+        return DEFAULT_META
+
+
+META = load_metadata()
 FEATURES = META["features"]
 FEATURE_COLUMNS = [f["column"] for f in FEATURES]
 MODEL_FILENAME = META["model_filename"]
