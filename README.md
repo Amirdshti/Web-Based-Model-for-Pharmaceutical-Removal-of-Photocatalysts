@@ -1,71 +1,32 @@
-# XGB–PSO Pharmaceutical Degradation Predictor
+# XGB-PSO Pharmaceutical Removal Streamlit App
 
-This Streamlit project loads the saved XGB–PSO model and predicts removal/degradation of pharmaceutical pollutants by photocatalysts.
+This version follows the Excel workflow described in Section 7.4:
 
-## Required model file
+1. Download the Excel template.
+2. Fill the photocatalyst/pharmaceutical data.
+3. Upload the completed file.
+4. Run the saved XGB-PSO model.
+5. Review predictions, optional validation metrics, and the R2 plot.
+6. Download the Excel results and plot.
 
-Copy this file into the project folder, beside `app.py`:
+## Required repository files
 
-`XGBPSOModel_success_seed605.pkl`
+- `app.py`
+- `requirements.txt`
+- `runtime.txt`
+- `SampleData.xlsx` (the exact downloadable Excel template)
+- `XGBPSOModel_success_seed605.pkl`
 
-For local use, the app also checks your current Windows path:
+The model file must be stored beside `app.py` for automatic loading on Streamlit Community Cloud. Alternatively, it can be uploaded through the app sidebar during each session.
 
-`C:\Users\24550372\OneDrive - UTS\UTS PhD\Photocatalyst\Pharmaceutical Review\Data and model\pharmamlv3\XGBPSOModel_success_seed605.pkl`
+## Important input rules
 
-The `.pkl` file is not included in this package because it was not uploaded to the chat.
+- The descriptive `Oxidant` column is not a numerical model input.
+- The model uses oxidant concentration in mM.
+- Light source: UV = 1, visible light = 2, simulated solar light = 3. Text labels are accepted.
+- Catalyst dosage must be entered in mg/L.
+- The experimental degradation/removal column is optional. When supplied, the app calculates R2, RMSE, MAE, MAPE, AARD, residuals, and the experimental-versus-predicted plot.
+- Uploaded rows are treated as unseen data; the final model is not retrained.
 
-## Exact model input order
 
-1. BET specific surface area (m²/g)
-2. Oxidant concentration (mM)
-3. Molecular weight (g/mol)
-4. HBDC
-5. HBAC
-6. TPSA (Å²)
-7. Initial pollutant concentration, C0 (mg/L)
-8. Solution pH
-9. Light source code: UV = 1, visible light = 2, simulated solar light = 3
-10. Photocatalyst dosage (mg/L)
-11. Reaction time (min)
-
-This order was reconstructed from the supplied `pharmamlv20.mat` matrix and the manuscript SHAP/PDP figures. Do not change it.
-
-## Run locally
-
-1. Put the model beside `app.py`, or leave it at the Windows path above.
-2. Open Command Prompt in this project folder.
-3. Install packages:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-4. Start the app:
-
-```bash
-python -m streamlit run app.py
-```
-
-You can also double-click `run_local.bat` after installing the requirements.
-
-## Deploy on Streamlit Community Cloud
-
-1. Create a GitHub repository.
-2. Upload all files in this folder, including the trusted `.pkl` model.
-3. In Streamlit Community Cloud, select the repository and set the main file to `app.py`.
-4. Deploy and copy the public app URL into the manuscript.
-
-## Model compatibility
-
-Pickled models can depend on the versions of `xgboost`, `scikit-learn`, and Python used during training. If loading fails, install the same package versions used when `XGBPSOModel_success_seed605.pkl` was created, then pin those versions in `requirements.txt`.
-
-## Included functions
-
-- Single-condition prediction
-- Exact light-source coding
-- Training-range warnings
-- Excel template download
-- Batch Excel/CSV prediction
-- Downloadable prediction results
-- Saved train/test performance table
-- Experimental-versus-predicted validation plot
+The Step 1 download button serves `SampleData.xlsx` directly, without recreating or modifying the workbook.

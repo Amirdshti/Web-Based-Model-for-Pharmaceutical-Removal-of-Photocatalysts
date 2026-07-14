@@ -40,6 +40,8 @@ from sklearn.metrics import mean_absolute_error, r2_score
 APP_DIR = Path(__file__).resolve().parent
 MODEL_FILENAME = "XGBPSOModel_success_seed605.pkl"
 MODEL_PATH = APP_DIR / MODEL_FILENAME
+TEMPLATE_FILENAME = "SampleData.xlsx"
+TEMPLATE_PATH = APP_DIR / TEMPLATE_FILENAME
 
 # This Windows path is checked only when the app is run on the user's own PC.
 # It is not accessible from Streamlit Community Cloud.
@@ -374,85 +376,12 @@ def identify_domain_extrapolation(model_inputs: pd.DataFrame) -> tuple[pd.Series
 
 
 def create_excel_template() -> bytes:
-    blank_data = pd.DataFrame(columns=TEMPLATE_COLUMNS)
-    example_data = pd.DataFrame(
-        [
-            {
-                BET_COL: 100.0,
-                OXIDANT_NAME_COL: "None",
-                OXIDANT_CONC_COL: 0.0,
-                MW_COL: 444.4,
-                HBDC_COL: 6,
-                HBAC_COL: 9,
-                TPSA_COL: 182.0,
-                INITIAL_CONC_COL: 20.0,
-                PH_COL: 7.0,
-                LIGHT_COL: "Visible light",
-                CATALYST_COL: 500.0,
-                TIME_COL: 60.0,
-                TARGET_COL: 85.0,
-            }
-        ],
-        columns=TEMPLATE_COLUMNS,
-    )
-
-    instructions = pd.DataFrame(
-        {
-            "Item": [
-                "Required input columns",
-                "Oxidant column",
-                "Light source",
-                "Experimental target",
-                "Catalyst dosage",
-                "No oxidant",
-                "Unseen-data validation",
-                "Feature order",
-            ],
-            "Instruction": [
-                "Do not rename the template columns. Add one experimental condition per row.",
-                "Oxidant is descriptive only and is retained in the output; it is not sent to the model.",
-                "Enter UV, Visible light, or Simulated solar light. Numeric codes 1, 2, and 3 are also accepted.",
-                "The final column is optional. Fill it to calculate R², RMSE, MAE, MAPE, AARD, and residuals.",
-                "Use mg/L, matching the model-development dataset.",
-                "Enter 0 in Oxidant concentration (mM) when no oxidant is used.",
-                "Uploaded rows are treated as new unseen observations. The saved final model is not retrained.",
-                "The application automatically enforces the exact 11-variable order used during model training.",
-            ],
-        }
-    )
-
-    domain = pd.DataFrame(
-        [
-            {"Input": column, "Minimum": limits[0], "Maximum": limits[1]}
-            for column, limits in TRAINING_DOMAIN.items()
-        ]
-    )
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        blank_data.to_excel(writer, sheet_name="Data Template", index=False)
-        example_data.to_excel(writer, sheet_name="Example Row", index=False)
-        instructions.to_excel(writer, sheet_name="Instructions", index=False)
-        domain.to_excel(writer, sheet_name="Training Domain", index=False)
-
-        for sheet_name in writer.book.sheetnames:
-            worksheet = writer.book[sheet_name]
-            worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
-            for cell in worksheet[1]:
-                updated_font = copy(cell.font)
-                updated_font.bold = True
-                cell.font = updated_font
-            for column_cells in worksheet.columns:
-                max_length = max(
-                    len(str(cell.value)) if cell.value is not None else 0
-                    for cell in column_cells
-                )
-                column_letter = column_cells[0].column_letter
-                worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
-
-    buffer.seek(0)
-    return buffer.getvalue()
+    """Return the exact SampleData.xlsx workbook supplied with the app."""
+    if not TEMPLATE_PATH.exists() or not TEMPLATE_PATH.is_file():
+        raise FileNotFoundError(
+            f"{TEMPLATE_FILENAME} is missing. Upload it beside app.py in the GitHub repository."
+        )
+    return TEMPLATE_PATH.read_bytes()
 
 
 def create_results_workbook(
@@ -635,11 +564,18 @@ with st.sidebar.expander("Final model performance"):
 # ============================================================
 st.subheader("Step 1: Download Excel Template")
 
+try:
+    template_bytes = create_excel_template()
+except FileNotFoundError as error:
+    template_bytes = None
+    st.error(str(error))
+
 st.download_button(
-    label="Download Pharmaceutical Model Data Template",
-    data=create_excel_template(),
-    file_name="Pharmaceutical_XGB_PSO_Input_Template.xlsx",
+    label="Download SampleData Excel Template",
+    data=template_bytes if template_bytes is not None else b"",
+    file_name=TEMPLATE_FILENAME,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    disabled=template_bytes is None,
 )
 
 st.info(
