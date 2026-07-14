@@ -28,7 +28,7 @@ Light source coding: `1 = UV`, `2 = visible light`, `3 = simulated solar light`.
 3. Choose the train/test split.
 4. Enable PSO and select particles, iterations and CV folds.
 5. Develop/redevelop the XGBoost–PSO model.
-6. Review train/test/total R², RMSE, MAE and MAPE, the R² plot, feature importance and optimized hyperparameters.
+6. Review train/test/total R², RMSE, MAE and MAPE, the R² plot and optimized hyperparameters.
 7. Download the Excel results, trained `.pkl` model and R² plot.
 
 ## Streamlit deployment files
@@ -56,3 +56,8 @@ PSO runtime is approximately proportional to:
 `particles × iterations × cross-validation folds`
 
 The manuscript used 5 particles and 100 iterations. The app defaults to 30 iterations so it is more practical on Streamlit Community Cloud; users can select 100 iterations when needed.
+
+
+## Simplified interface
+
+The feature-importance section, PSO convergence-history section, and user-facing base-random-seed control have been removed. Each model-development run automatically uses a fresh internal random seed.

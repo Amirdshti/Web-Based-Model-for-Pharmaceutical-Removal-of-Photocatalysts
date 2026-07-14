@@ -9,7 +9,7 @@ Workflow
 3. Select the train/test ratio and model settings.
 4. Develop or redevelop an XGBoost model, with optional PSO optimization.
 5. Display R², RMSE, MAE and MAPE for train, test and total data.
-6. Display an experimental-versus-predicted plot and feature importance.
+6. Display an experimental-versus-predicted plot and optimized hyperparameters.
 7. Download predictions, statistics, hyperparameters, plot and trained model.
 """
 
@@ -102,7 +102,6 @@ def clear_model_results() -> None:
         "results_df",
         "metrics_df",
         "params_df",
-        "feature_importance_df",
         "y_train",
         "y_test",
         "y_train_pred",
@@ -111,7 +110,6 @@ def clear_model_results() -> None:
         "excel_results",
         "model_file",
         "best_cv_r2",
-        "random_seed",
         "model_name",
     ]
     for key in keys_to_remove:
@@ -225,7 +223,7 @@ def optimize_xgb_with_pso(
     inertia: float,
     cv_folds: int,
     random_seed: int,
-) -> tuple[dict[str, Any], float, pd.DataFrame]:
+) -> tuple[dict[str, Any], float]:
     """A compact global-best PSO implementation that maximizes mean CV R²."""
     lower = np.array([50, 0.01, 0.50, 2, 1.0, 0.0, 0.30], dtype=float)
     upper = np.array([500, 0.30, 1.00, 15, 20.0, 12.0, 1.00], dtype=float)
@@ -247,7 +245,6 @@ def optimize_xgb_with_pso(
     progress_bar = st.progress(0)
     progress_message = st.empty()
     best_message = st.empty()
-    history: list[dict[str, float]] = []
 
     def evaluate_particle(position: np.ndarray) -> float:
         params = params_from_position(position)
@@ -282,8 +279,6 @@ def optimize_xgb_with_pso(
             global_best_position = positions[iteration_best_index].copy()
 
         current_best_r2 = -global_best_cost
-        history.append({"Iteration": iteration + 1, "Best CV R2": current_best_r2})
-
         completed = int(100 * (iteration + 1) / iterations)
         progress_bar.progress(completed)
         progress_message.write(
@@ -301,11 +296,7 @@ def optimize_xgb_with_pso(
         positions = np.clip(positions + velocities, lower, upper)
 
     progress_message.success("PSO hyperparameter optimization completed.")
-    return (
-        params_from_position(global_best_position),
-        float(-global_best_cost),
-        pd.DataFrame(history),
-    )
+    return params_from_position(global_best_position), float(-global_best_cost)
 
 
 def create_r2_plot(
@@ -381,33 +372,16 @@ def create_r2_plot(
     return fig, png_buffer.getvalue()
 
 
-def create_feature_importance_plot(feature_importance_df: pd.DataFrame) -> plt.Figure:
-    plot_df = feature_importance_df.sort_values("Importance", ascending=True)
-    fig, ax = plt.subplots(figsize=(8, 5.8))
-    ax.barh(plot_df["Input variable"], plot_df["Importance"])
-    ax.set_xlabel("XGBoost feature importance")
-    ax.set_ylabel("Input variable")
-    ax.set_title("Feature Importance of the Developed Model")
-    ax.grid(False)
-    fig.tight_layout()
-    return fig
-
-
 def create_excel_results(
     results_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
     params_df: pd.DataFrame,
-    feature_importance_df: pd.DataFrame,
-    pso_history_df: pd.DataFrame,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         results_df.to_excel(writer, sheet_name="Predictions", index=False)
         metrics_df.to_excel(writer, sheet_name="Statistical Results", index=False)
         params_df.to_excel(writer, sheet_name="Hyperparameters", index=False)
-        feature_importance_df.to_excel(writer, sheet_name="Feature Importance", index=False)
-        if not pso_history_df.empty:
-            pso_history_df.to_excel(writer, sheet_name="PSO Progress", index=False)
     output.seek(0)
     return output.getvalue()
 
@@ -523,20 +497,6 @@ if estimated_test_rows < 2:
 
 st.sidebar.header("Model Development Settings")
 use_pso = st.sidebar.checkbox("Use PSO hyperparameter optimization", value=True)
-base_seed = int(
-    st.sidebar.number_input(
-        "Base random seed",
-        min_value=0,
-        max_value=2_000_000_000,
-        value=605,
-        step=1,
-    )
-)
-change_seed_each_attempt = st.sidebar.checkbox(
-    "Use a new train/test split on each rerun",
-    value=True,
-)
-
 if use_pso:
     st.sidebar.subheader("PSO Settings")
     n_particles = st.sidebar.slider("Number of particles", 5, 30, 5, 5)
@@ -569,10 +529,7 @@ run_model = st.button("Develop / Redevelop XGBoost–PSO Model", type="primary")
 
 if run_model:
     st.session_state.attempt += 1
-    if change_seed_each_attempt:
-        random_seed = base_seed + st.session_state.attempt - 1
-    else:
-        random_seed = base_seed
+    random_seed = int(time.time()) + st.session_state.attempt
 
     X = working_df[INPUT_COLUMNS].to_numpy(dtype=float)
     y = working_df[OUTPUT_COLUMN].to_numpy(dtype=float)
@@ -595,7 +552,6 @@ if run_model:
         st.error("The test subset contains fewer than two observations; R² cannot be calculated.")
         st.stop()
 
-    pso_history_df = pd.DataFrame()
     best_cv_r2 = float("nan")
 
     with st.spinner("Developing the model. This may take several minutes when PSO is enabled..."):
@@ -605,7 +561,7 @@ if run_model:
             if effective_cv < 2:
                 st.error("Insufficient training observations for cross-validation.")
                 st.stop()
-            best_params, best_cv_r2, pso_history_df = optimize_xgb_with_pso(
+            best_params, best_cv_r2 = optimize_xgb_with_pso(
                 X_train,
                 y_train,
                 n_particles=n_particles,
@@ -664,20 +620,12 @@ if run_model:
             {
                 **best_params,
                 **pso_settings,
-                "Random seed": random_seed,
                 "Training percentage": train_percent,
                 "Testing percentage": test_percent,
                 "Total valid rows": len(working_df),
             }
         ]
     )
-
-    feature_importance_df = pd.DataFrame(
-        {
-            "Input variable": INPUT_COLUMNS,
-            "Importance": model.feature_importances_,
-        }
-    ).sort_values("Importance", ascending=False, ignore_index=True)
 
     fig, plot_png = create_r2_plot(
         y_train,
@@ -695,8 +643,6 @@ if run_model:
         results_df,
         metrics_df,
         params_df,
-        feature_importance_df,
-        pso_history_df,
     )
     model_file = create_model_download(model)
 
@@ -705,8 +651,6 @@ if run_model:
     st.session_state.results_df = results_df
     st.session_state.metrics_df = metrics_df
     st.session_state.params_df = params_df
-    st.session_state.feature_importance_df = feature_importance_df
-    st.session_state.pso_history_df = pso_history_df
     st.session_state.y_train = y_train
     st.session_state.y_test = y_test
     st.session_state.y_train_pred = y_train_pred
@@ -715,7 +659,6 @@ if run_model:
     st.session_state.excel_results = excel_results
     st.session_state.model_file = model_file
     st.session_state.best_cv_r2 = best_cv_r2
-    st.session_state.random_seed = random_seed
     st.session_state.model_name = model_name
 
 
@@ -732,8 +675,7 @@ if st.session_state.model_trained:
     st.header("Developed Model Results")
     st.write(
         f"Model: **{st.session_state.model_name}** | "
-        f"Attempt: **{st.session_state.attempt}** | "
-        f"Random seed: **{st.session_state.random_seed}**"
+        f"Attempt: **{st.session_state.attempt}**"
     )
 
     if np.isfinite(st.session_state.best_cv_r2):
@@ -770,19 +712,6 @@ if st.session_state.model_trained:
 
     with st.expander("Prediction results", expanded=False):
         st.dataframe(st.session_state.results_df, use_container_width=True)
-
-    with st.expander("Feature importance", expanded=False):
-        st.dataframe(st.session_state.feature_importance_df, use_container_width=True, hide_index=True)
-        importance_fig = create_feature_importance_plot(st.session_state.feature_importance_df)
-        st.pyplot(importance_fig)
-        plt.close(importance_fig)
-
-    if not st.session_state.pso_history_df.empty:
-        with st.expander("PSO convergence history", expanded=False):
-            st.line_chart(
-                st.session_state.pso_history_df.set_index("Iteration")["Best CV R2"]
-            )
-            st.dataframe(st.session_state.pso_history_df, use_container_width=True, hide_index=True)
 
     st.subheader("Download the Developed Model and Results")
     download_cols = st.columns(3)
